@@ -137,10 +137,17 @@ async def compare(request: CompareRequest):
 
 # ── Static file serving (frontend) ───────────────────────────────────
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "out"
+# In Docker, frontend/out is copied to /app/frontend-static
+# Locally, it's at ../frontend/out relative to this file
+FRONTEND_DIR = Path("/app/frontend-static")
+if not FRONTEND_DIR.exists():
+    FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "out"
 
 if FRONTEND_DIR.exists():
-    app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "_next" / "static"), name="static")
+    # Mount _next directory for JS/CSS assets
+    next_dir = FRONTEND_DIR / "_next"
+    if next_dir.exists():
+        app.mount("/_next", StaticFiles(directory=next_dir), name="nextjs-assets")
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):

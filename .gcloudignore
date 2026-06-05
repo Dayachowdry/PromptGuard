@@ -1,0 +1,11 @@
+# Override .gitignore for Cloud Build uploads
+# We need frontend/out/ (pre-built static export) in the build context
+.git
+docs
+frontend/node_modules
+frontend/.next
+__pycache__
+*.pyc
+.env
+.env.*
+start.sh
