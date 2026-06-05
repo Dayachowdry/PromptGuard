@@ -1,20 +1,43 @@
 """Pydantic models for PromptGuard API."""
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal
+
+
+PersonaId = Literal["intern", "sales", "developer", "director", "pentester"]
+ModelId = Literal["claude", "gpt", "gemini"]
 
 
 class QueryRequest(BaseModel):
     """Single query request."""
-    persona: str = Field(..., description="Persona ID: intern, sales, developer, director, pentester")
-    query: str = Field(..., description="User query to send to the LLM")
-    model: str = Field(default="claude", description="LLM backend: claude, gpt, gemini")
+    persona: PersonaId = Field(
+        ...,
+        description="Persona ID: intern, sales, developer, director, pentester",
+    )
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="User query to send to the LLM",
+    )
+    model: ModelId = Field(
+        default="gemini",
+        description="LLM backend: claude, gpt, gemini",
+    )
 
 
 class CompareRequest(BaseModel):
     """Compare mode request — same query across all trust levels."""
-    query: str = Field(..., description="User query to compare across all personas")
-    model: str = Field(default="claude", description="LLM backend: claude, gpt, gemini")
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="User query to compare across all personas",
+    )
+    model: ModelId = Field(
+        default="gemini",
+        description="LLM backend: claude, gpt, gemini",
+    )
 
 
 class TrustInfo(BaseModel):
@@ -63,3 +86,8 @@ class ExampleQuery(BaseModel):
     id: int
     text: str
     category: str
+
+
+class LoginRequest(BaseModel):
+    """Static access-code login request."""
+    code: str = Field(..., min_length=1, max_length=256, description="Static access code")

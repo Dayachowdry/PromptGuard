@@ -8,13 +8,15 @@ FastAPI backend that demonstrates the PromptGuard architecture:
 """
 
 import os
+import logging
+import secrets
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 
 from models import (
     QueryRequest,
@@ -23,9 +25,14 @@ from models import (
     CompareResponse,
     Persona,
     ExampleQuery,
+    LoginRequest,
 )
-from trust import get_persona, get_all_personas, get_all_examples, PERSONAS
-from gateway import process_query, process_compare, MODELS
+from trust import get_all_personas, get_all_examples, PERSONAS
+from gateway import process_query, process_compare, MODELS, get_public_models
+
+
+logger = logging.getLogger(__name__)
+SESSION_COOKIE_NAME = "promptguard_access"
 
 
 @asynccontextmanager
@@ -53,14 +60,64 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def _get_allowed_origins() -> list[str]:
+    configured = os.environ.get("ALLOWED_ORIGINS", "")
+    if configured.strip():
+        return [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return []
+
+
+def _is_auth_enabled() -> bool:
+    return bool(os.environ.get("PROMPTGUARD_ACCESS_CODE"))
+
+
+def _is_authenticated(request: Request) -> bool:
+    if not _is_auth_enabled():
+        return True
+    cookie_value = request.cookies.get(SESSION_COOKIE_NAME, "")
+    access_code = os.environ.get("PROMPTGUARD_ACCESS_CODE", "")
+    return bool(cookie_value) and secrets.compare_digest(cookie_value, access_code)
+
+
+def _apply_security_headers(response, path: str):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Cache-Control"] = "no-store" if path.startswith("/api/") else "public, max-age=300"
+    return response
+
+
+allowed_origins = _get_allowed_origins()
+if allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path not in {
+        "/api/health",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/auth/session",
+    }:
+        if not _is_authenticated(request):
+            return _apply_security_headers(
+                JSONResponse(
+                    status_code=401,
+                    content={"detail": "Authentication required."},
+                ),
+                request.url.path,
+            )
+
+    response = await call_next(request)
+    return _apply_security_headers(response, request.url.path)
 
 
 # ── API Routes ────────────────────────────────────────────────────────
@@ -87,10 +144,43 @@ async def list_examples():
 @app.get("/api/models")
 async def list_models():
     """List available LLM backends."""
-    return {
-        k: {"name": v["name"], "model_id": v["model_id"]}
-        for k, v in MODELS.items()
-    }
+    return get_public_models()
+
+
+@app.get("/api/auth/session")
+async def auth_session(request: Request):
+    """Report whether the current browser session is authenticated."""
+    return {"authenticated": _is_authenticated(request)}
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request, payload: LoginRequest):
+    """Exchange a static access code for an authenticated browser session."""
+    if not _is_auth_enabled():
+        return {"authenticated": True}
+
+    access_code = os.environ.get("PROMPTGUARD_ACCESS_CODE", "")
+    if not secrets.compare_digest(payload.code, access_code):
+        raise HTTPException(status_code=401, detail="Invalid access code.")
+
+    response = JSONResponse({"authenticated": True})
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=access_code,
+        httponly=True,
+        samesite="lax",
+        secure=bool(os.environ.get("K_SERVICE")) or request.url.scheme == "https",
+        max_age=60 * 60 * 24 * 7,
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    """Clear the authenticated browser session."""
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie(SESSION_COOKIE_NAME, httponly=True, samesite="lax")
+    return response
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -109,8 +199,9 @@ async def query(request: QueryRequest):
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LLM call failed: {str(e)}")
+    except Exception:
+        logger.exception("Unhandled error during single-query request")
+        raise HTTPException(status_code=500, detail="The model request failed.")
 
 
 @app.post("/api/compare", response_model=CompareResponse)
@@ -131,8 +222,9 @@ async def compare(request: CompareRequest):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Compare failed: {str(e)}")
+    except Exception:
+        logger.exception("Unhandled error during compare request")
+        raise HTTPException(status_code=500, detail="The compare request failed.")
 
 
 # ── Static file serving (frontend) ───────────────────────────────────

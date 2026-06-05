@@ -5,8 +5,8 @@ to the selected LLM backend. Supports Claude, GPT, and Gemini.
 """
 
 import os
-import json
 import asyncio
+import logging
 
 import anthropic
 from google import genai
@@ -15,6 +15,10 @@ from openai import AsyncOpenAI
 from trust import get_persona
 from templates import build_system_prompt
 from models import QueryResponse, TrustInfo
+
+
+logger = logging.getLogger(__name__)
+DEFAULT_MODEL = "gemini"
 
 
 # ── Model configuration ──────────────────────────────────────────────
@@ -37,6 +41,12 @@ MODELS = {
     },
 }
 
+PROVIDER_API_KEYS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
+}
+
 
 # ── LLM Clients (lazy-initialized) ───────────────────────────────────
 
@@ -48,6 +58,7 @@ _gemini_client = None
 def _get_anthropic_client():
     global _anthropic_client
     if _anthropic_client is None:
+        _require_provider_key("anthropic")
         _anthropic_client = anthropic.AsyncAnthropic(
             api_key=os.environ.get("ANTHROPIC_API_KEY")
         )
@@ -57,6 +68,7 @@ def _get_anthropic_client():
 def _get_openai_client():
     global _openai_client
     if _openai_client is None:
+        _require_provider_key("openai")
         _openai_client = AsyncOpenAI(
             api_key=os.environ.get("OPENAI_API_KEY")
         )
@@ -66,10 +78,32 @@ def _get_openai_client():
 def _get_gemini_client():
     global _gemini_client
     if _gemini_client is None:
+        _require_provider_key("google")
         _gemini_client = genai.Client(
             api_key=os.environ.get("GOOGLE_API_KEY")
         )
     return _gemini_client
+
+
+def _require_provider_key(provider: str) -> None:
+    key_name = PROVIDER_API_KEYS[provider]
+    if not os.environ.get(key_name):
+        raise ValueError(f"{provider.title()} is not configured on this deployment.")
+
+
+def model_is_configured(model_key: str) -> bool:
+    model = MODELS.get(model_key)
+    if not model:
+        return False
+    return bool(os.environ.get(PROVIDER_API_KEYS[model["provider"]]))
+
+
+def get_public_models() -> dict[str, dict[str, str]]:
+    return {
+        key: {"name": value["name"], "model_id": value["model_id"]}
+        for key, value in MODELS.items()
+        if model_is_configured(key)
+    }
 
 
 # ── Core Gateway Logic ────────────────────────────────────────────────
@@ -77,7 +111,7 @@ def _get_gemini_client():
 async def process_query(
     persona_id: str,
     query: str,
-    model_key: str = "claude",
+    model_key: str = DEFAULT_MODEL,
 ) -> QueryResponse:
     """Process a single query through the PromptGuard pipeline.
 
@@ -94,6 +128,8 @@ async def process_query(
     model_config = MODELS.get(model_key)
     if not model_config:
         raise ValueError(f"Unknown model: {model_key}. Options: claude, gpt, gemini")
+    if not model_is_configured(model_key):
+        raise ValueError(f"{model_config['name']} is not configured on this deployment.")
 
     # Build the enriched system prompt (the core of PromptGuard)
     system_prompt = build_system_prompt(persona)
@@ -135,7 +171,7 @@ async def process_query(
 
 async def process_compare(
     query: str,
-    model_key: str = "claude",
+    model_key: str = DEFAULT_MODEL,
 ) -> list[QueryResponse]:
     """Process a query across all 5 trust levels simultaneously.
 
@@ -154,10 +190,11 @@ async def process_compare(
     responses = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
+            logger.error("Compare request failed for persona %s: %s", persona_ids[i], result)
             persona = get_persona(persona_ids[i])
             responses.append(
                 QueryResponse(
-                    response=f"Error: {str(result)}",
+                    response="This model request failed for this persona on the current deployment.",
                     trust_info=TrustInfo(
                         persona_id=persona_ids[i],
                         persona_title=persona["title"] if persona else "Unknown",
