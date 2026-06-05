@@ -3,7 +3,7 @@
 # Stage 2: Python FastAPI serving both API + frontend
 
 # ── Stage 1: Build frontend ──────────────────────────────────────────
-FROM node:22-alpine AS frontend-builder
+FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
@@ -18,7 +18,7 @@ WORKDIR /app
 
 # Install Node.js for Next.js standalone server
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
